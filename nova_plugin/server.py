@@ -17,15 +17,16 @@
 import os
 import time
 import copy
+import operator
 
 from novaclient import exceptions as nova_exceptions
+from retrying import retry
 
 from cloudify import ctx
 from cloudify.manager import get_rest_client
 from cloudify.decorators import operation
 from cloudify.exceptions import NonRecoverableError, RecoverableError
 from cinder_plugin import volume
-from novaclient.exceptions import NotFound
 from openstack_plugin_common import (
     provider,
     transform_resource_name,
@@ -388,6 +389,7 @@ def _set_network_and_ip_runtime_properties(server):
     ctx.instance.runtime_properties[IP_PROPERTY] = manager_network_ip
 
 
+@retry(stop_max_attempt_number=10)
 @operation
 @with_nova_client
 def connect_floatingip(nova_client, fixed_ip, **kwargs):
@@ -410,16 +412,12 @@ def connect_floatingip(nova_client, fixed_ip, **kwargs):
     server = nova_client.servers.get(server_id)
     server.add_floating_ip(floating_ip_address, fixed_ip or None)
 
-    try:
-        floating_ip_object = \
-            nova_client.floating_ips.find(ip=floating_ip_address)
-        if floating_ip_object.instance_id != server_id:
-            raise NonRecoverableError(
+    server = nova_client.servers.get(server_id)
+    all_server_ips = reduce(operator.add, server.networks.values())
+    if floating_ip_address not in all_server_ips:
+        raise NonRecoverableError(
                     'Failed to assign floating ip {0} to machine {1}.'.format(
                         floating_ip_address, server_id))
-    except NotFound:
-        raise NonRecoverableError('Failed to find floating ip {0}.'.format(
-                                  floating_ip_address))
 
 
 @operation
