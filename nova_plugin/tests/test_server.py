@@ -19,6 +19,7 @@ import tempfile
 import unittest
 import mock
 
+from nova_plugin.server import _merge_nics
 import nova_plugin
 from cloudify.test_utils import workflow_test
 
@@ -171,3 +172,26 @@ class TestServer(unittest.TestCase):
                     'CloudifyAgent.agent_key_path',
                     new_callable=mock.PropertyMock, return_value=key_path):
                 cfy_local.execute('install', task_retries=5)
+
+
+class TestServerNICs(unittest.TestCase):
+    def test_merge_prepends_management_network(self):
+        """When the mgmt network isnt in a relationship, its the 1st nic
+        """
+        mgmt_network_id = 'management network'
+        nics = [{'net-id': 'other network'}]
+
+        merged = _merge_nics(mgmt_network_id, nics)
+
+        self.assertEqual(len(merged), 2)
+        self.assertEqual(merged[0]['net-id'], 'management network')
+
+    def test_management_network_in_relationships(self):
+        """When the mgmt network was in a relationship, it's not prepended
+        """
+        mgmt_network_id = 'management network'
+        nics = [{'net-id': 'other network'}, {'net-id': 'management network'}]
+
+        merged = _merge_nics(mgmt_network_id, nics)
+
+        self.assertEqual(merged, nics)
