@@ -31,7 +31,7 @@ from openstack_plugin_common import (
 )
 
 
-class TestGettingRelatedResources(TestCase):
+class RelationshipsTestBase(TestCase):
     def _make_vm_ctx_with_relationships(self, rel_specs):
         """Prepare a mock CloudifyContext from the given relationship spec
 
@@ -71,42 +71,8 @@ class TestGettingRelatedResources(TestCase):
             relationships.append(rel_ctx)
         return MockCloudifyContext(node_id='vm', relationships=relationships)
 
-    def test_get_relationships(self):
-        """get_relationships_by_openstack_type finds a rel by instance type
-        """
 
-        rel_spec = {
-            'type': 'cloudify.relationships.connected_to',
-            'instance': {
-                'runtime_properties': {
-                    OPENSTACK_TYPE_PROPERTY: NETWORK_OPENSTACK_TYPE
-                }
-            }
-        }
-        ctx = self._make_vm_ctx_with_relationships([rel_spec])
-        filtered = get_relationships_by_openstack_type(ctx,
-                                                       NETWORK_OPENSTACK_TYPE)
-
-        self.assertEqual(len(filtered), 1)
-        self.assertEqual(filtered[0].type,
-                         'cloudify.relationships.connected_to')
-
-    def test_get_relationships_finds_by_type(self):
-        """get_relationships_by_openstack_type filters out other instance types
-        """
-
-        rel_spec = {
-            'type': 'cloudify.relationships.connected_to',
-            'instance': {
-                'runtime_properties': {
-                    OPENSTACK_TYPE_PROPERTY: 'something else'
-                }
-            }
-        }
-        ctx = self._make_vm_ctx_with_relationships([rel_spec])
-        filtered = get_relationships_by_openstack_type(ctx,
-                                                       NETWORK_OPENSTACK_TYPE)
-        self.assertEqual(len(filtered), 0)
+class TestGettingRelatedResources(RelationshipsTestBase):
 
     def test_get_relationships_finds_all_by_type(self):
         """get_relationships_by_openstack_type returns all rels that match
@@ -149,45 +115,39 @@ class TestGettingRelatedResources(TestCase):
             ctx, NETWORK_OPENSTACK_TYPE)
         self.assertEqual(ids, ['the node id'])
 
-    def test_get_single_id(self):
-        rel_spec = {
+
+class TestGetSingleByID(RelationshipsTestBase):
+    def _make_instances(self, ids):
+        """Mock cloudify context with relationships to instances with the ids
+        """
+        rel_specs = [{
+            'node': {
+                'id': node_id
+            },
             'instance': {
                 'runtime_properties': {
                     OPENSTACK_TYPE_PROPERTY: NETWORK_OPENSTACK_TYPE,
-                    OPENSTACK_ID_PROPERTY: 'the node id'
+                    OPENSTACK_ID_PROPERTY: node_id
                 }
             }
-        }
-        ctx = self._make_vm_ctx_with_relationships([rel_spec])
+        } for node_id in ids]
+        return self._make_vm_ctx_with_relationships(rel_specs)
+
+    def test_get_single_id(self):
+        ctx = self._make_instances(['the node id'])
         found_id = get_openstack_id_of_single_connected_node_by_openstack_type(
             ctx, NETWORK_OPENSTACK_TYPE)
         self.assertEqual(found_id, 'the node id')
 
     def test_get_single_id_two_found(self):
-        rel_specs = [{
-            'instance': {
-                'runtime_properties': {
-                    OPENSTACK_TYPE_PROPERTY: NETWORK_OPENSTACK_TYPE,
-                    OPENSTACK_ID_PROPERTY: instance_id
-                }
-            }
-        } for instance_id in range(2)]
-        ctx = self._make_vm_ctx_with_relationships(rel_specs)
+        ctx = self._make_instances([0, 1])
         self.assertRaises(
             NonRecoverableError,
             get_openstack_id_of_single_connected_node_by_openstack_type, ctx,
             NETWORK_OPENSTACK_TYPE)
 
     def test_get_single_id_two_found_if_exists_true(self):
-        rel_specs = [{
-            'instance': {
-                'runtime_properties': {
-                    OPENSTACK_TYPE_PROPERTY: NETWORK_OPENSTACK_TYPE,
-                    OPENSTACK_ID_PROPERTY: instance_id
-                }
-            }
-        } for instance_id in range(2)]
-        ctx = self._make_vm_ctx_with_relationships(rel_specs)
+        ctx = self._make_instances([0, 1])
 
         try:
             get_openstack_id_of_single_connected_node_by_openstack_type(
@@ -198,8 +158,7 @@ class TestGettingRelatedResources(TestCase):
             self.fail()
 
     def test_get_single_id_if_exists_none_found(self):
-        rel_spec = []
-        ctx = self._make_vm_ctx_with_relationships(rel_spec)
+        ctx = self._make_instances([])
         found = get_openstack_id_of_single_connected_node_by_openstack_type(
             ctx, NETWORK_OPENSTACK_TYPE, if_exists=True)
         self.assertIs(found, None)
@@ -214,50 +173,21 @@ class TestGettingRelatedResources(TestCase):
             NETWORK_OPENSTACK_TYPE)
 
     def test_get_single_node(self):
-        rel_spec = {
-            'node': {
-                'id': 'the node id'
-            },
-            'instance': {
-                'runtime_properties': {
-                    OPENSTACK_TYPE_PROPERTY: NETWORK_OPENSTACK_TYPE
-                }
-            }
-        }
-        ctx = self._make_vm_ctx_with_relationships([rel_spec])
+        ctx = self._make_instances(['the node id'])
         found_node = get_single_connected_node_by_openstack_type(
             ctx, NETWORK_OPENSTACK_TYPE)
         self.assertEqual(found_node.id, 'the node id')
 
     def test_get_single_node_two_found(self):
-        rel_spec = [{
-            'node': {
-                'id': node_id
-            },
-            'instance': {
-                'runtime_properties': {
-                    OPENSTACK_TYPE_PROPERTY: NETWORK_OPENSTACK_TYPE
-                }
-            }
-        } for node_id in range(2)]
-        ctx = self._make_vm_ctx_with_relationships(rel_spec)
+        ctx = self._make_instances([0, 1])
         self.assertRaises(
             NonRecoverableError,
             get_single_connected_node_by_openstack_type,
             ctx, NETWORK_OPENSTACK_TYPE)
 
     def test_get_single_node_two_found_if_exists(self):
-        rel_spec = [{
-            'node': {
-                'id': node_id
-            },
-            'instance': {
-                'runtime_properties': {
-                    OPENSTACK_TYPE_PROPERTY: NETWORK_OPENSTACK_TYPE
-                }
-            }
-        } for node_id in range(2)]
-        ctx = self._make_vm_ctx_with_relationships(rel_spec)
+        ctx = self._make_instances([0, 1])
+
         self.assertRaises(
             NonRecoverableError,
             get_single_connected_node_by_openstack_type,
@@ -266,15 +196,15 @@ class TestGettingRelatedResources(TestCase):
             if_exists=True)
 
     def test_get_single_node_if_exists_none_found(self):
-        rel_spec = []
-        ctx = self._make_vm_ctx_with_relationships(rel_spec)
+        ctx = self._make_instances([])
+
         found = get_single_connected_node_by_openstack_type(
             ctx, NETWORK_OPENSTACK_TYPE, if_exists=True)
         self.assertIs(found, None)
 
     def test_get_single_node_none_found(self):
-        rel_spec = []
-        ctx = self._make_vm_ctx_with_relationships(rel_spec)
+        ctx = self._make_instances([])
+
         self.assertRaises(
             NonRecoverableError,
             get_single_connected_node_by_openstack_type,
