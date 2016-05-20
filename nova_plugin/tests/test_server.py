@@ -19,8 +19,8 @@ import tempfile
 import unittest
 import mock
 
-from nova_plugin.server import _merge_nics
 import nova_plugin
+from cloudify.decorators import workflow
 from cloudify.test_utils import workflow_test
 
 
@@ -174,15 +174,43 @@ class TestServer(unittest.TestCase):
                 cfy_local.execute('install', task_retries=5)
 
 
-@mock.patch('nova_plugin.server.start')
-@mock.patch('nova_plugin.server._handle_image_or_flavor')
-@mock.patch('nova_plugin.server._fail_on_missing_required_parameters')
-class TestServerNICs(unittest.TestCase):
-    blueprint_path = path.join('resources',
-                               'test-networks-relationships-blueprint.yaml')
+class TestMergeNICs(unittest.TestCase):
+    def test_merge_prepends_management_network(self):
+        """When the mgmt network isnt in a relationship, its the 1st nic."""
+        mgmt_network_id = 'management network'
+        nics = [{'net-id': 'other network'}]
+
+        merged = nova_plugin.server._merge_nics(mgmt_network_id, nics)
+
+        self.assertEqual(len(merged), 2)
+        self.assertEqual(merged[0]['net-id'], 'management network')
+
+    def test_management_network_in_relationships(self):
+        """When the mgmt network was in a relationship, it's not prepended."""
+        mgmt_network_id = 'management network'
+        nics = [{'net-id': 'other network'}, {'net-id': 'management network'}]
+
+        merged = nova_plugin.server._merge_nics(mgmt_network_id, nics)
+
+        self.assertEqual(nics, merged)
+
+
+from openstack_plugin_common import NeutronClientWithSugar, OPENSTACK_TYPE_PROPERTY, OPENSTACK_ID_PROPERTY
+from neutron_plugin.network import NETWORK_OPENSTACK_TYPE
+from nova_plugin.tests.test_relationships import RelationshipsTestBase
+
+from nova_plugin.server import _prepare_server_nics
+class TestServerNICs(RelationshipsTestBase):
+    @classmethod
+    def setUpClass(cls):
+        super(TestServerNICs, cls).setUpClass()
+
+        class MockNeutronClient(NeutronClientWithSugar):
+            list_networks = cls.mock_get_networks
+        cls.mock_neutron = MockNeutronClient()
 
     @staticmethod
-    def mock_get_networks(neutron, name=None, **search_params):
+    def mock_get_networks(neutron=None, name=None, **search_params):
         networks = [
             {'name': 'network1', 'id': '1'},
             {'name': 'network2', 'id': '2'},
@@ -198,104 +226,141 @@ class TestServerNICs(unittest.TestCase):
             return {'networks': [n for n in networks if n['name'] == name]}
         return {'networks': networks}
 
+    def _make_vm_ctx_with_networks(self, management_network_name, networks):
+        network_specs = [
+            {
+                'instance': {
+                    'runtime_properties': {
+                        OPENSTACK_TYPE_PROPERTY: NETWORK_OPENSTACK_TYPE,
+                        OPENSTACK_ID_PROPERTY: network['id']
+                    }
+                },
+                'node': {
+                    'properties': network
+                }
+            } for network in networks]
+        vm_properties = {'management_network_name': management_network_name}
+        return self._make_vm_ctx_with_relationships(network_specs,
+                                                    vm_properties)
+
+    def test_nova_server_creation_nics_ordering(self):
+        # """NIC list keeps the order of the relationships from the blueprint.
+
+        # The nics= list passed to nova.server.create should be ordered
+        # depending on the relationships to the networks, as defined in the
+        # blueprint.
+        # This test unfortunately necessarily depends on dict ordering to fail:
+        # it's still possible for the NICs to be correctly ordered by chance,
+        # although with 6 elements, the chance is negligible.
+        # """
+        ctx = self._make_vm_ctx_with_networks(
+            management_network_name='network1',
+            networks=[
+                {'id': '1'},
+                {'id': '2'},
+                {'id': '3'},
+                {'id': '4'},
+                {'id': '5'},
+                {'id': '6'},
+            ])
+        server = {'meta': {}}
+
+        _prepare_server_nics(
+            self.mock_neutron, ctx, server)
+
+        self.assertEqual(
+            ['1', '2', '3', '4', '5', '6'],
+            [n['net-id'] for n in server['nics']])
+
+    def test_server_creation_prepends_mgmt_network(self):
+        # """When the mgmt network isnt in a relationship, its the 1st nic.
+
+        # Creating the server examines the relationships, and if it doesn't find
+        # a relationship to the management network, id adds the network to the
+        # NICs list anyway, as the first element.
+        # """
+        ctx = self._make_vm_ctx_with_networks(
+            management_network_name='other',
+            networks=[
+                {'id': '1'},
+                {'id': '2'},
+                {'id': '3'},
+                {'id': '4'},
+                {'id': '5'},
+                {'id': '6'},
+            ])
+        server = {'meta': {}}
+
+        _prepare_server_nics(
+            self.mock_neutron, ctx, server)
+
+        first_nic = server['nics'][0]
+        self.assertEqual('other', first_nic['net-id'])
+        self.assertEqual(7, len(server['nics']))
+
+    def test_server_creation_uses_relation_mgmt_nic(self):
+        # """When the mgmt network is in a relationship, it isn't prepended.
+
+        # If the server has a relationship to the management network,
+        # a new NIC isn't prepended to the list.
+        # """
+
+        ctx = self._make_vm_ctx_with_networks(
+            management_network_name='network1',
+            networks=[
+                {'id': '1'},
+                {'id': '2'},
+                {'id': '3'},
+                {'id': '4'},
+                {'id': '5'},
+                {'id': '6'},
+            ])
+        server = {'meta': {}}
+
+        _prepare_server_nics(
+            self.mock_neutron, ctx, server)
+        self.assertEqual(6, len(server['nics']))
+
+
+class TestServerPortNICs(RelationshipsTestBase):
+    @classmethod
+    def setUpClass(cls):
+        super(TestServerNICs, cls).setUpClass()
+
+        class MockNeutronClient(NeutronClientWithSugar):
+            list_networks = cls.mock_get_networks
+        cls.mock_neutron = MockNeutronClient()
+
     @staticmethod
-    def mock_get_ports(neutron, name=None, **search_params):
-        ports = [
-            {'name': 'port1', 'id': 'port1'},
+    def mock_get_networks(neutron=None, name=None, **search_params):
+        networks = [
+            {'name': 'network1', 'id': '1'},
+            {'name': 'network2', 'id': '2'},
+            {'name': 'network3', 'id': '3'},
+            {'name': 'network4', 'id': '4'},
+            {'name': 'network5', 'id': '5'},
+            {'name': 'network6', 'id': '6'},
+            {'name': 'other', 'id': 'other'}
         ]
         # this method is used to both list all networks, and to search
         # for networks by name - the mock needs to implement both cases
         if name is not None:
-            return {'ports': [n for n in ports if n['name'] == name]}
-        return {'ports': ports}
+            return {'networks': [n for n in networks if n['name'] == name]}
+        return {'networks': networks}
 
-    def test_merge_prepends_management_network(self, *mocks):
-        """When the mgmt network isnt in a relationship, its the 1st nic."""
-        mgmt_network_id = 'management network'
-        nics = [{'net-id': 'other network'}]
-
-        merged = _merge_nics(mgmt_network_id, nics)
-
-        self.assertEqual(len(merged), 2)
-        self.assertEqual(merged[0]['net-id'], 'management network')
-
-    def test_management_network_in_relationships(self, *mocks):
-        """When the mgmt network was in a relationship, it's not prepended."""
-        mgmt_network_id = 'management network'
-        nics = [{'net-id': 'other network'}, {'net-id': 'management network'}]
-
-        merged = _merge_nics(mgmt_network_id, nics)
-
-        self.assertEqual(nics, merged)
-
-    @workflow_test(blueprint_path, copy_plugin_yaml=True)
-    def test_nova_server_creation_nics_ordering(self, cfy_local, *mocks):
-        """NIC list keeps the order of the relationships from the blueprint.
-
-        The nics= list passed to nova.server.create should be ordered
-        depending on the relationships to the networks, as defined in the
-        blueprint.
-        This test unfortunately necessarily depends on dict ordering to fail:
-        it's still possible for the NICs to be correctly ordered by chance,
-        although with 6 elements, the chance is negligible.
-        """
-        with mock.patch('openstack_plugin_common.nova_client.servers.'
-                        'ServerManager.create') as mock_create, \
-            mock.patch('openstack_plugin_common.neutron_client.Client.'
-                       'list_networks', new=self.mock_get_networks), \
-            mock.patch('openstack_plugin_common.neutron_client.Client.'
-                       'list_ports', new=self.mock_get_ports):
-
-            cfy_local.execute('install', task_retries=0)
-
-        self.assertEqual(1, len(mock_create.mock_calls))
-        server_args, server_kwargs = mock_create.call_args_list[0]
-
-        network_ids = [n['net-id'] for n in server_kwargs['nics']]
-        self.assertEqual(['1', '2', '3', '4', '5', '6'], network_ids)
-
-    @workflow_test(blueprint_path, copy_plugin_yaml=True, inputs={
-        'management_network_name': 'other'
-    })
-    def test_server_creation_prepends_mgmt_network(self, cfy_local, *mocks):
-        """When the mgmt network isnt in a relationship, its the 1st nic.
-
-        Creating the server examines the relationships, and if it doesn't find
-        a relationship to the management network, id adds the network to the
-        NICs list anyway, as the first element.
-        """
-        with mock.patch('openstack_plugin_common.nova_client.servers.'
-                        'ServerManager.create') as mock_create, \
-            mock.patch('openstack_plugin_common.neutron_client.Client.'
-                       'list_networks', new=self.mock_get_networks):
-
-            cfy_local.execute('install', task_retries=0)
-
-        self.assertEqual(len(mock_create.mock_calls), 1)
-        server_args, server_kwargs = mock_create.call_args_list[0]
-
-        first_nic = server_kwargs['nics'][0]
-        self.assertEqual('other', first_nic['net-id'])
-
-    @workflow_test(blueprint_path, copy_plugin_yaml=True, inputs={
-        'management_network_name': 'network1'
-    })
-    def test_server_creation_uses_relation_mgmt_nic(self, cfy_local, *mocks):
-        """When the mgmt network is in a relationship, it isn't prepended.
-
-        If the server has a relationship to the management network,
-        a new NIC isn't prepended to the list.
-        """
-        with mock.patch('openstack_plugin_common.nova_client.servers.'
-                        'ServerManager.create') as mock_create, \
-            mock.patch('openstack_plugin_common.neutron_client.Client.'
-                       'list_networks', new=self.mock_get_networks):
-
-            cfy_local.execute('install', task_retries=0)
-
-        self.assertEqual(1, len(mock_create.mock_calls))
-        server_args, server_kwargs = mock_create.call_args_list[0]
-
-        # blueprint defines 6 network relationships, so there should be 6 NICs,
-        # not 7
-        self.assertEqual(6, len(server_kwargs['nics']))
+    def _make_vm_ctx_with_networks(self, management_network_name, networks):
+        network_specs = [
+            {
+                'instance': {
+                    'runtime_properties': {
+                        OPENSTACK_TYPE_PROPERTY: NETWORK_OPENSTACK_TYPE,
+                        OPENSTACK_ID_PROPERTY: network['id']
+                    }
+                },
+                'node': {
+                    'properties': network
+                }
+            } for network in networks]
+        vm_properties = {'management_network_name': management_network_name}
+        return self._make_vm_ctx_with_relationships(network_specs,
+                                                    vm_properties)
