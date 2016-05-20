@@ -143,8 +143,7 @@ def _prepare_server_nics(neutron_client, ctx, server):
         management_network_id,
         server.get('nics', []),
         [{'net-id': net_id} for net_id in network_ids],
-        [{'net-id': net_id} for net_id in
-            get_port_network_ids_(neutron_client, port_ids)])
+        get_port_networks(neutron_client, port_ids))
 
     if management_network_id is not None:
         server['meta']['cloudify_management_network_id'] = \
@@ -266,11 +265,14 @@ def create(nova_client, neutron_client, args, **kwargs):
     ctx.instance.runtime_properties[OPENSTACK_NAME_PROPERTY] = server['name']
 
 
-def get_port_network_ids_(neutron_client, port_ids):
+def get_port_networks(neutron_client, port_ids):
 
     def get_network(port_id):
         port = neutron_client.show_port(port_id)
-        return port['port']['network_id']
+        return {
+            'net-id': port['port']['network_id'],
+            'port-id': port['port']['id']
+        }
 
     return map(get_network, port_ids)
 
