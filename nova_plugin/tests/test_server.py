@@ -197,9 +197,20 @@ class TestMergeNICs(unittest.TestCase):
 
 from openstack_plugin_common import NeutronClientWithSugar, OPENSTACK_TYPE_PROPERTY, OPENSTACK_ID_PROPERTY
 from neutron_plugin.network import NETWORK_OPENSTACK_TYPE
+from neutron_plugin.port import PORT_OPENSTACK_TYPE
 from nova_plugin.tests.test_relationships import RelationshipsTestBase
 
 from nova_plugin.server import _prepare_server_nics
+
+
+def _matches(obj, search_params):
+    return all(obj[k] == v for k, v in search_params.items())
+
+
+def _search_filter(objs, search_params):
+    return [obj for obj in objs if _matches(obj, search_params)]
+
+
 class TestServerNICs(RelationshipsTestBase):
     @classmethod
     def setUpClass(cls):
@@ -325,11 +336,29 @@ class TestServerNICs(RelationshipsTestBase):
 class TestServerPortNICs(RelationshipsTestBase):
     @classmethod
     def setUpClass(cls):
-        super(TestServerNICs, cls).setUpClass()
+        super(TestServerPortNICs, cls).setUpClass()
 
         class MockNeutronClient(NeutronClientWithSugar):
             list_networks = cls.mock_get_networks
+            list_ports = cls.mock_get_ports
+            show_port = cls.mock_show_port
         cls.mock_neutron = MockNeutronClient()
+
+    @staticmethod
+    def mock_show_port(neutron, port_id):
+        ports = neutron.list_ports(id=port_id)
+        return {'port': ports['ports'][0]}
+
+    @staticmethod
+    def mock_get_ports(neutron=None, **search_params):
+        ports = [
+            {'name': 'port1', 'id': '1', 'network_id': '1'},
+            {'name': 'port2', 'id': '2', 'network_id': '1'},
+            {'name': 'port3', 'id': '3', 'network_id': '2'},
+            {'name': 'port4', 'id': '4', 'network_id': '2'},
+        ]
+        ports = _search_filter(ports, search_params)
+        return {'ports': ports}
 
     @staticmethod
     def mock_get_networks(neutron=None, name=None, **search_params):
@@ -348,19 +377,29 @@ class TestServerPortNICs(RelationshipsTestBase):
             return {'networks': [n for n in networks if n['name'] == name]}
         return {'networks': networks}
 
-    def _make_vm_ctx_with_networks(self, management_network_name, networks):
-        network_specs = [
+    def _make_vm_ctx_with_ports(self, management_network_name, ports):
+        port_specs = [
             {
                 'instance': {
                     'runtime_properties': {
-                        OPENSTACK_TYPE_PROPERTY: NETWORK_OPENSTACK_TYPE,
-                        OPENSTACK_ID_PROPERTY: network['id']
+                        OPENSTACK_TYPE_PROPERTY: PORT_OPENSTACK_TYPE,
+                        OPENSTACK_ID_PROPERTY: port['id']
                     }
                 },
                 'node': {
-                    'properties': network
+                    'properties': port
                 }
-            } for network in networks]
+            } for port in ports]
         vm_properties = {'management_network_name': management_network_name}
-        return self._make_vm_ctx_with_relationships(network_specs,
+        return self._make_vm_ctx_with_relationships(port_specs,
                                                     vm_properties)
+
+    def test_network_with_port(self):
+        ports = [{'network_id': '1', 'id': '1'}]
+        ctx = self._make_vm_ctx_with_ports('network1', ports)
+        server = {'meta': {}}
+
+        _prepare_server_nics(
+            self.mock_neutron, ctx, server)
+
+        self.assertEqual([{'port-id': '1', 'net-id': '1'}], server['nics'])
